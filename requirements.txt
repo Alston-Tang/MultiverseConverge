@@ -1,0 +1,6 @@
+apache-airflow==2.7.1
+mongoengine~=0.27.0
+opencv-python
+tzdata
+pymongo~=4.5.0
+webdavclient3
