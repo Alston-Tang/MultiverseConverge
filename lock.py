@@ -31,12 +31,12 @@ def unlock_video(video_id: ObjectId, lock_id: ObjectId) -> None:
     return unlock(AirflowVideoLock, video_id, lock_id)
 
 
-def try_lock_archive(video_id: ObjectId) -> Optional[ObjectId]:
-    return try_lock(AirflowArchiveLock, video_id)
+def try_lock_archive(archive_id: ObjectId) -> Optional[ObjectId]:
+    return try_lock(AirflowArchiveLock, archive_id)
 
 
-def unlock_archive(video_id: ObjectId, lock_id: ObjectId) -> None:
-    return unlock(AirflowArchiveLock, video_id, lock_id)
+def unlock_archive(archive_id: ObjectId, lock_id: ObjectId) -> None:
+    return unlock(AirflowArchiveLock, archive_id, lock_id)
 
 
 if __name__ == '__main__':

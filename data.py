@@ -3,7 +3,8 @@ from os import path
 from typing import Optional, List
 
 from mongoengine import Document, StringField, DateTimeField, EmbeddedDocumentField, EmbeddedDocument, LongField, \
-    FloatField, IntField, BooleanField, EmbeddedDocumentListField, ReferenceField, ObjectIdField, DictField, MapField
+    FloatField, IntField, BooleanField, EmbeddedDocumentListField, ReferenceField, ObjectIdField, DictField, MapField, \
+    ListField, connect
 from bson import ObjectId
 
 
@@ -100,7 +101,24 @@ class BilibiliUploadResult(Document):
     Filename = StringField(required=True)
     Desc = StringField()
 
+    meta = {"db_alias": "airflow"}
 
 
+class BilibiliArchiveInfo(Document):
+    ArchiveId = ObjectIdField(required=True)
+    Bvid = StringField()
+    Aid = LongField()
+    Videos = ListField(ReferenceField(BilibiliUploadResult))
+
+    meta = {"db_alias": "airflow", "indexes": [{"fields": ["ArchiveId"], 'unique': True}]}
 
 
+if __name__ == "__main__":
+    connect(host="mongodb+srv://mongodb:TYmbYH4yQ1sDb5xJ@773.4oignmq.mongodb.net", alias='airflow', db='airflow')
+    video = BilibiliUploadResult.objects.get(RecordEventId=ObjectId("65620c486495fab9c0d81a1c"), Type="raw")
+    BilibiliArchiveInfo(
+        ArchiveId=ObjectId("65620c486495fab9c0d81a1e"),
+        Bvid="BV1E34y1F7Cq",
+        Aid=0,
+        Videos=[video]
+    ).save()
