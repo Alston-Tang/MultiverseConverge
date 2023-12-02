@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timedelta
 
 # The DAG object; we'll need this to instantiate a DAG
+from airflow.decorators import dag
 from airflow import DAG, AirflowException
 from airflow.decorators import task_group
 from airflow.models import Param, Variable
@@ -12,11 +13,11 @@ from airflow.operators.python import PythonOperator
 
 from bson import ObjectId
 
-from lock import try_lock_video, unlock_video, try_lock_archive, unlock_archive
-from webdav import upload, get_client
-from file import prepare_temp_storage, get_temp_file_abs_path
-from mongoengine import connect
-from data import BilibiliUploadResult, BilibiliArchiveInfo
+from common_tasks import setup, teardown, validate_record_info
+from lock import try_lock_archive, unlock_archive
+from util import parse_title
+from file import get_temp_file_abs_path
+from data import BilibiliUploadResult, BilibiliArchiveInfo, mongoengine_connect
 from command import run_command
 
 
@@ -29,102 +30,6 @@ def check_binary_exists(ti, name):
         ti.xcom_push(f"{name}_path", path)
         return True
     return False
-
-
-def mongoengine_connect():
-    mongodb_uri = Variable.get(key="mongodb_uri")
-    print(f"connect to mongodb {mongodb_uri}")
-    connect(host=mongodb_uri, alias='airflow', db='airflow')
-
-
-on_new_record = DAG(
-    dag_id="on_new_record",
-    catchup=False,
-    start_date=datetime(year=2023, month=11, day=16),
-    schedule_interval=None,
-    params={
-        "path": Param(None),
-        "file_obj_id": Param(None),
-        "archive_id": Param(None)
-    },
-)
-
-
-def upload_webdav(**kwargs):
-    ti = kwargs["ti"]
-    path = ti.xcom_pull(key="path", task_ids="setup")
-    bililive_root = Variable.get("bililive_root")
-    local_path = os.path.join(bililive_root, path)
-    remote_path_prefix = Variable.get("alist_directory")
-    if remote_path_prefix[-1] != '/':
-        remote_path_prefix += '/'
-    remote_path = remote_path_prefix + path
-    client = get_client()
-    print(f"upload file from {local_path} to {remote_path}")
-    upload(client, remote_path=remote_path, local_path=local_path)
-
-
-def setup(**kwargs):
-    ti = kwargs["ti"]
-    prepare_temp_storage(ti)
-    mongoengine_connect()
-    path: str = kwargs["path"]
-    filename: str = os.path.basename(path)
-    file_obj_id: str = kwargs["file_obj_id"]
-    archive_id: str = kwargs["archive_id"]
-    bililive_root: str = Variable.get("bililive_root")
-    abs_path: str = os.path.join(bililive_root, path)
-
-    ti.xcom_push(key="path", value=path)
-    ti.xcom_push(key="abs_path", value=abs_path)
-    ti.xcom_push(key="filename", value=filename)
-    ti.xcom_push(key="file_obj_id", value=file_obj_id)
-    ti.xcom_push(key="archive_id", value=archive_id)
-
-    while True:
-        video_lock_id = try_lock_video(ObjectId(file_obj_id))
-        if video_lock_id is not None:
-            break
-        print(f"cannot acquire lock for video {path} ({file_obj_id}), wait for 20 seconds and retry")
-        time.sleep(20)
-    ti.xcom_push(key="video_lock_id", value=str(video_lock_id))
-
-
-def teardown(**kwargs):
-    ti = kwargs["ti"]
-    mongoengine_connect()
-    file_obj_id = ti.xcom_pull(key="file_obj_id", task_ids="setup")
-    video_lock_id = ti.xcom_pull(key="video_lock_id", task_ids="setup")
-    print(f"file_obj_id={file_obj_id}, lock_id={video_lock_id}")
-    if file_obj_id and video_lock_id:
-        print(f"unlock video {file_obj_id} (lock_id={video_lock_id})")
-        unlock_video(ObjectId(file_obj_id), lock_id=ObjectId(video_lock_id))
-
-
-setup_task = PythonOperator(
-    task_id="setup",
-    op_kwargs={
-        "path": "{{ params.path }}",
-        "file_obj_id": "{{ params.file_obj_id }}",
-        "archive_id": "{{ params.archive_id }}"},
-    python_callable=setup,
-    dag=on_new_record,
-    execution_timeout=timedelta(minutes=10)
-)
-
-"""
-upload_webdav_task = PythonOperator(
-    task_id="upload_webdav",
-    python_callable=upload_webdav,
-    dag=on_new_record,
-)
-"""
-
-teardown_task = PythonOperator(
-    task_id="teardown",
-    python_callable=teardown,
-    dag=on_new_record
-)
 
 
 def ensure_danmaku_factory(**kwargs):
@@ -191,28 +96,23 @@ def generate_danmaku_record(**kwargs):
 
 @task_group(
     group_id="generate_danmaku_version",
-    dag=on_new_record
 )
 def generate_danmaku_version_group():
     ensure_danmaku_factory_task = PythonOperator(
         task_id="ensure_danmaku_factory",
         python_callable=ensure_danmaku_factory,
-        dag=on_new_record
     )
     convert_danmaku_to_ass_task = PythonOperator(
         task_id="convert_danmaku_to_ass",
         python_callable=convert_danmaku_to_ass,
-        dag=on_new_record
     )
     ensure_ffmpeg_task = PythonOperator(
         task_id="ensure_ffmpeg",
         python_callable=ensure_ffmpeg,
-        dag=on_new_record
     )
     generate_danmaku_record_task = PythonOperator(
         task_id="generate_danmaku_record",
         python_callable=generate_danmaku_record,
-        dag=on_new_record
     )
     ensure_danmaku_factory_task >> convert_danmaku_to_ass_task
     ensure_ffmpeg_task >> generate_danmaku_record_task
@@ -235,6 +135,7 @@ def setup_for_upload_type(ti, upload_type):
     else:
         raise AirflowException(f"unknown upload type {upload_type}")
     return file
+
 
 def rush_c_upload(**kwargs):
     ti = kwargs["ti"]
@@ -291,6 +192,13 @@ def teardown_unlock_archive(**kwargs):
     unlock_archive(ObjectId(archive_id), ObjectId(lock_id))
 
 
+def construct_p_title(title, video_type):
+    title = title.removesuffix("_danmaku")
+    if video_type == "danmaku":
+        return f"弹幕_{title}"
+    return title
+
+
 def construct_submit_command(archive_info, execution_summary_path, rush_c_submit_path, bvid):
     cookie_path = Variable.get("cookie_path")
     cover_path = Variable.get("cover_path")
@@ -299,10 +207,16 @@ def construct_submit_command(archive_info, execution_summary_path, rush_c_submit
     title_date_str = None
     files = []
     for video in archive_info["Videos"]:
+        # 20231125_七海Nana7mi_嗨暗之魂3_220124
         title = video["Title"]
+        # ["raw", "danmaku"]
+        video_type = video["Type"]
+        # n231126qn3lignju7nynr611zk23om0f
         filename = video["Filename"]
+        # [20231125, 七海Nana7mi, 嗨暗之魂3, 220124]
         title_split = parse_title(title)
-        files.append(f"{filename}:{title}")
+        p_title = construct_p_title(title, video_type)
+        files.append(f"{filename}:{p_title}")
         if title_date_str is None:
             title_date_str = title_split["date_str"]
 
@@ -321,16 +235,6 @@ def construct_submit_command(archive_info, execution_summary_path, rush_c_submit
     command.append(','.join(files))
     return command
 
-
-
-def parse_title(title):
-    title_split = title.split('_')
-    if len(title_split) < 4:
-        raise AirflowException(f"cannot parse title {title}")
-    date_str = title_split[0]
-    live_title = title_split[2]
-    time_str = title_split[3]
-    return {"date_str": date_str, "live_title": live_title, "time_str": time_str}
 
 def video_sort_key(video):
     title = video["Title"]
@@ -383,38 +287,32 @@ def rush_c_submit(**kwargs):
 
 def create_bilibili_upload_group(upload_type):
     @task_group(
-        group_id=f"upload_to_bilibili_{upload_type}",
-        dag=on_new_record
+        group_id=f"upload_to_bilibili_{upload_type}"
     )
     def upload_to_bilibili_group(upload_type_):
         ensure_rush_c_task = PythonOperator(
             task_id="ensure_rush_c",
             python_callable=ensure_rush_c,
-            dag=on_new_record
         )
         rush_c_upload_task = PythonOperator(
             task_id="rush_c_upload",
             python_callable=rush_c_upload,
-            dag=on_new_record,
             op_kwargs={"upload_type": upload_type_},
             retries=3
         )
         lock_archive_task = PythonOperator(
             task_id="lock_archive",
             python_callable=lock_archive,
-            dag=on_new_record,
             execution_timeout=timedelta(minutes=10),
         )
         unlock_archive_task = PythonOperator(
             task_id="unlock_archive",
             python_callable=teardown_unlock_archive,
-            dag=on_new_record,
             op_kwargs={"upload_type": upload_type_}
         )
         rush_c_submit_task = PythonOperator(
             task_id="rush_c_submit",
             python_callable=rush_c_submit,
-            dag=on_new_record,
             op_kwargs={"upload_type": upload_type_},
             retries=3,
         )
@@ -423,4 +321,29 @@ def create_bilibili_upload_group(upload_type):
     return upload_to_bilibili_group(upload_type)
 
 
-setup_task.as_setup() >> [create_bilibili_upload_group("raw"), generate_danmaku_version_group()] >> teardown_task.as_teardown()
+@dag(
+    schedule_interval=None,
+    start_date=datetime(year=2023, month=11, day=16),
+    catchup=False,
+    params={
+        "path": Param(None),
+        "file_obj_id": Param(None),
+        "archive_id": Param(None)
+    })
+def on_new_record():
+    setup_task = setup().as_setup()
+    validate_record_info_task = validate_record_info()
+    generate_danmaku_version_group_tasks = generate_danmaku_version_group()
+    bilibili_upload_group_raw_task = create_bilibili_upload_group("raw")
+    bilibili_upload_group_danmaku_task = create_bilibili_upload_group("danmaku")
+    teardown_task = teardown().as_teardown()
+
+    setup_task >> validate_record_info_task
+    validate_record_info_task >> generate_danmaku_version_group_tasks
+    validate_record_info_task >> bilibili_upload_group_raw_task
+    generate_danmaku_version_group_tasks >> bilibili_upload_group_danmaku_task
+    bilibili_upload_group_raw_task >> teardown_task
+    bilibili_upload_group_danmaku_task >> teardown_task
+
+
+on_new_record()

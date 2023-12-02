@@ -2,10 +2,18 @@ from datetime import datetime
 from os import path
 from typing import Optional, List
 
+from airflow.models import Variable
 from mongoengine import Document, StringField, DateTimeField, EmbeddedDocumentField, EmbeddedDocument, LongField, \
     FloatField, IntField, BooleanField, EmbeddedDocumentListField, ReferenceField, ObjectIdField, DictField, MapField, \
     ListField, connect
 from bson import ObjectId
+
+
+def mongoengine_connect():
+    mongodb_uri = Variable.get(key="mongodb_uri")
+    print(f"connect to mongodb {mongodb_uri}")
+    connect(host=mongodb_uri, alias='airflow', db='airflow')
+    connect(host=mongodb_uri, alias='bililive', db='bililive')
 
 
 class BililiveFile:
@@ -16,21 +24,6 @@ class BililiveFile:
     # may not be correct and does not actually reflect the time in the video
     start_time: datetime
     end_time: datetime
-
-
-class Archive:
-    files: List[BililiveFile]
-    title: str
-    cover_path: path
-    # 转载来源
-    source: str
-    # 投稿分区id
-    # 参考B站定义: https://www.bilibili.com/read/cv18327205/
-    category_id: int
-    tags: List[str]
-    description: str
-    # B站投稿id
-    bv_id: Optional[str] = None
 
 
 # MongoEngine definition
@@ -59,7 +52,25 @@ class FileClosedEventDoc(Document):
     EventData = EmbeddedDocumentField(FileClosedDataDoc)
     Host = StringField()
 
-    meta = {'collection': 'records'}
+    meta = {'collection': 'records', 'db_alias': 'bililive'}
+
+
+class ArchiveVideo(EmbeddedDocument):
+    RelativePath = StringField()
+    FileCloseTime = DateTimeField()
+    FileOpenTime = DateTimeField()
+    Duration = FloatField()
+    RecorderEventId = ObjectIdField()
+
+
+class Archive(Document):
+    ArchiveStartTime = DateTimeField()
+    ArchiveEndTime = DateTimeField()
+    ArchiveDuration = FloatField()
+    HostId = StringField()
+    Videos = ListField(EmbeddedDocumentField(ArchiveVideo))
+
+    meta = {'collection': 'archive', 'db_alias': 'bililive'}
 
 
 class BilibiliVideo(EmbeddedDocument):
