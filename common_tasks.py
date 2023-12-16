@@ -12,8 +12,17 @@ from bson import ObjectId
 from data import mongoengine_connect, Archive, ArchiveVideo, FileClosedEventDoc
 from file import prepare_temp_storage
 from lock import try_lock_video, unlock_video
-from util import construct_title_from_videos
+from util import construct_title_from_videos, check_binary_exists
 from webdav import get_client, upload
+
+
+@task()
+def ensure_rush_c(**context):
+    ti = context["ti"]
+    if not check_binary_exists(ti, "rush_c_upload"):
+        raise AirflowException("RushC upload program doesn't exist")
+    if not check_binary_exists(ti, "rush_c_submit"):
+        raise AirflowException("RushC submit program doesn't exist")
 
 
 @task(execution_timeout=timedelta(minutes=10))

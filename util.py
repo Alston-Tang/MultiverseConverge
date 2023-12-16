@@ -1,7 +1,9 @@
+import os
 from typing import List
 from pathlib import Path
 
 from airflow import AirflowException
+from airflow.models import Variable
 
 from data import ArchiveVideo
 
@@ -39,3 +41,14 @@ def construct_title_from_videos(videos: List[ArchiveVideo]):
         archive_title = archive_title[:-1]
     archive_title = f"【直播录像】{title_date_str}-" + archive_title
     return archive_title
+
+
+def check_binary_exists(ti, name):
+    bin_root = Variable.get("bin_root")
+    if bin_root is None:
+        raise AirflowException("bin_root variable is not defined")
+    path = os.path.join(bin_root, name)
+    if os.path.isfile(path):
+        ti.xcom_push(f"{name}_path", path)
+        return True
+    return False

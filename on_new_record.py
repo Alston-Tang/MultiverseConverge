@@ -13,23 +13,12 @@ from airflow.operators.python import PythonOperator
 
 from bson import ObjectId
 
-from common_tasks import setup, teardown, validate_record_info
+from common_tasks import setup, teardown, validate_record_info, ensure_rush_c
 from lock import try_lock_archive, unlock_archive
-from util import parse_title
+from util import parse_title, check_binary_exists
 from file import get_temp_file_abs_path
 from data import BilibiliUploadResult, BilibiliArchiveInfo, mongoengine_connect
 from command import run_command
-
-
-def check_binary_exists(ti, name):
-    bin_root = Variable.get("bin_root")
-    if bin_root is None:
-        raise AirflowException("bin_root variable is not defined")
-    path = os.path.join(bin_root, name)
-    if os.path.isfile(path):
-        ti.xcom_push(f"{name}_path", path)
-        return True
-    return False
 
 
 def ensure_danmaku_factory(**kwargs):
@@ -85,9 +74,11 @@ def generate_danmaku_record(**kwargs):
     if ass_file is None:
         raise AirflowException("cannot get previously generated ass file from xcom")
     print(f"using {ass_file} and {abs_path} to generate {output_path}")
-    command =  [ffmpeg_path, "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi",
-         "-i", abs_path, "-vf", f"scale_vaapi,hwmap=mode=read+write+direct,format=nv12,ass={ass_file},hwmap", "-c:v",
-         "hevc_vaapi", output_path]
+    command = [ffmpeg_path, "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format",
+               "vaapi",
+               "-i", abs_path, "-vf", f"scale_vaapi,hwmap=mode=read+write+direct,format=nv12,ass={ass_file},hwmap",
+               "-c:v",
+               "hevc_vaapi", output_path]
     return_code = run_command(command)
     if return_code != 0:
         raise AirflowException(f"{command} returns {return_code}")
@@ -119,14 +110,6 @@ def generate_danmaku_version_group():
     convert_danmaku_to_ass_task >> generate_danmaku_record_task
 
 
-def ensure_rush_c(**kwargs):
-    ti = kwargs["ti"]
-    if not check_binary_exists(ti, "rush_c_upload"):
-        raise AirflowException("RushC upload program doesn't exist")
-    if not check_binary_exists(ti, "rush_c_submit"):
-        raise AirflowException("RushC submit program doesn't exist")
-
-
 def setup_for_upload_type(ti, upload_type):
     if upload_type == "raw":
         file = ti.xcom_pull(key="abs_path", task_ids="setup")
@@ -143,7 +126,8 @@ def rush_c_upload(**kwargs):
     file = setup_for_upload_type(ti, upload_type)
     cookie_path = Variable.get("cookie_path")
     file_obj_id = ti.xcom_pull(key="file_obj_id", task_ids="setup")
-    rush_c_upload_path = ti.xcom_pull(key="rush_c_upload_path", task_ids=f"upload_to_bilibili_{upload_type}.ensure_rush_c")
+    rush_c_upload_path = ti.xcom_pull(key="rush_c_upload_path",
+                                      task_ids=f"ensure_rush_c")
     summary_file_name = str(uuid.uuid1())
     execution_summary_path = get_temp_file_abs_path(ti, summary_file_name)
 
@@ -155,7 +139,7 @@ def rush_c_upload(**kwargs):
         summary = json.load(summary_json_file)
         mongoengine_connect()
         query_result = BilibiliUploadResult.objects(RecorderEventId=ObjectId(file_obj_id),
-                                                                  Type=upload_type)
+                                                    Type=upload_type)
         if len(query_result) > 0:
             bilibili_upload_result = query_result[0]
         else:
@@ -275,7 +259,8 @@ def rush_c_submit(**kwargs):
     dry_run = ti.xcom_pull(key="dry_run", task_ids="setup")
     if dry_run:
         print("rush c submit will not actually submit video to bilibili because dry_run == True")
-    rush_c_submit_path = ti.xcom_pull(key="rush_c_submit_path", task_ids=f"upload_to_bilibili_{upload_type}.ensure_rush_c")
+    rush_c_submit_path = ti.xcom_pull(key="rush_c_submit_path",
+                                      task_ids=f"ensure_rush_c")
     bilibili_upload_result_id = ti.xcom_pull(
         key="bilibili_upload_result_id",
         task_ids=f"upload_to_bilibili_{upload_type}.rush_c_upload")
@@ -324,10 +309,6 @@ def create_bilibili_upload_group(upload_type):
         group_id=f"upload_to_bilibili_{upload_type}"
     )
     def upload_to_bilibili_group(upload_type_):
-        ensure_rush_c_task = PythonOperator(
-            task_id="ensure_rush_c",
-            python_callable=ensure_rush_c,
-        )
         rush_c_upload_task = PythonOperator(
             task_id="rush_c_upload",
             python_callable=rush_c_upload,
@@ -350,7 +331,8 @@ def create_bilibili_upload_group(upload_type):
             op_kwargs={"upload_type": upload_type_},
             retries=3,
         )
-        ensure_rush_c_task >> rush_c_upload_task >> lock_archive_task >> rush_c_submit_task >> unlock_archive_task.as_teardown(setups=lock_archive_task)
+        rush_c_upload_task >> lock_archive_task >> rush_c_submit_task >> unlock_archive_task.as_teardown(
+            setups=lock_archive_task)
 
     return upload_to_bilibili_group(upload_type)
 
@@ -367,6 +349,7 @@ def create_bilibili_upload_group(upload_type):
     })
 def on_new_record():
     setup_task = setup().as_setup()
+    ensure_rush_c_task = ensure_rush_c()
     validate_record_info_task = validate_record_info()
     generate_danmaku_version_group_tasks = generate_danmaku_version_group()
     bilibili_upload_group_raw_task = create_bilibili_upload_group("raw")
@@ -374,9 +357,12 @@ def on_new_record():
     teardown_task = teardown().as_teardown()
 
     setup_task >> validate_record_info_task
+    setup_task >> ensure_rush_c_task
     validate_record_info_task >> generate_danmaku_version_group_tasks
     validate_record_info_task >> bilibili_upload_group_raw_task
+    ensure_rush_c_task >> bilibili_upload_group_raw_task
     generate_danmaku_version_group_tasks >> bilibili_upload_group_danmaku_task
+    ensure_rush_c_task >> bilibili_upload_group_danmaku_task
     bilibili_upload_group_raw_task >> teardown_task
     bilibili_upload_group_danmaku_task >> teardown_task
 
