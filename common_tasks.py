@@ -30,6 +30,7 @@ def setup(**context):
     abs_path = None
     file_obj_id = None
     archive_id = None
+    dry_run = False
 
     if "path" in context["params"]:
         path = context["params"]["path"]
@@ -39,6 +40,9 @@ def setup(**context):
         file_obj_id = context["params"]["file_obj_id"]
     if "archive_id" in context["params"]:
         archive_id = context["params"]["archive_id"]
+    if "dry_run" in context["params"]:
+        dry_run = context["params"]["dry_run"]
+        print(f"dry_run == {dry_run}")
 
     if path is not None:
         ti.xcom_push(key="path", value=path)
@@ -50,6 +54,10 @@ def setup(**context):
         ti.xcom_push(key="file_obj_id", value=file_obj_id)
     if archive_id is not None:
         ti.xcom_push(key="archive_id", value=archive_id)
+    if dry_run is not None:
+        ti.xcom_push(key="dry_run", value=dry_run)
+    else:
+        ti.xcom_push(key="dry_run", value=False)
 
     if file_obj_id:
         print(f"try to acquire lock for video {file_obj_id} ({path})")

@@ -199,47 +199,72 @@ def construct_p_title(title, video_type):
     return title
 
 
-def construct_submit_command(archive_info, execution_summary_path, rush_c_submit_path, bvid):
-    cookie_path = Variable.get("cookie_path")
-    cover_path = Variable.get("cover_path")
-    archive_title = ""
-    prev_live_title = None
+def construct_archive_title(archive_info):
     title_date_str = None
-    files = []
+    prev_live_title = None
+    archive_title = ""
     for video in archive_info["Videos"]:
-        # 20231125_七海Nana7mi_嗨暗之魂3_220124
-        title = video["Title"]
         # ["raw", "danmaku"]
         video_type = video["Type"]
-        # n231126qn3lignju7nynr611zk23om0f
-        filename = video["Filename"]
+        if video_type != 'raw':
+            continue
+        # 20231125_七海Nana7mi_嗨暗之魂3_220124
+        title = video["Title"]
         # [20231125, 七海Nana7mi, 嗨暗之魂3, 220124]
         title_split = parse_title(title)
-        p_title = construct_p_title(title, video_type)
-        files.append(f"{filename}:{p_title}")
+        # use the earliest date str as the prefix of archive title
         if title_date_str is None:
             title_date_str = title_split["date_str"]
-
         live_title = title_split["live_title"]
         if live_title != prev_live_title:
             archive_title = archive_title + live_title + '/'
             prev_live_title = live_title
+
     if archive_title[-1] == '/':
         archive_title = archive_title[:-1]
     archive_title = f"【直播录像】{title_date_str}-" + archive_title
+    return archive_title
 
-    command = [rush_c_submit_path, "--cookie", cookie_path, "--cover", cover_path, "--execution-summary-path", execution_summary_path, "--title", archive_title]
+
+def construct_files_list(archive_info):
+    files = []
+    for video in archive_info["Videos"]:
+        # n231126qn3lignju7nynr611zk23om0f
+        filename = video["Filename"]
+        # ["raw", "danmaku"]
+        video_type = video["Type"]
+        # 20231125_七海Nana7mi_嗨暗之魂3_220124
+        title = video["Title"]
+
+        p_title = construct_p_title(title, video_type)
+        files.append(f"{filename}:{p_title}")
+
+    return ','.join(files)
+
+
+def construct_submit_command(archive_info, execution_summary_path, rush_c_submit_path, bvid):
+    cookie_path = Variable.get("cookie_path")
+    cover_path = Variable.get("cover_path")
+
+    files_list = construct_files_list(archive_info)
+    archive_title = construct_archive_title(archive_info)
+
+    command = [rush_c_submit_path,
+               "--cookie", cookie_path,
+               "--cover", cover_path,
+               "--execution-summary-path", execution_summary_path,
+               "--title", archive_title]
     if bvid is not None:
         command.append("--vid")
         command.append(bvid)
-    command.append(','.join(files))
+    command.append(files_list)
     return command
 
 
 def video_sort_key(video):
     title = video["Title"]
     title_split = parse_title(title)
-    return f"{title_split['date_str']}_{title_split['time_str']}"
+    return video["Type"], title_split['date_str'], title_split['time_str']
 
 
 def rush_c_submit(**kwargs):
@@ -247,6 +272,9 @@ def rush_c_submit(**kwargs):
     mongoengine_connect()
     upload_type = kwargs["upload_type"]
     archive_id = ti.xcom_pull(key="archive_id", task_ids="setup")
+    dry_run = ti.xcom_pull(key="dry_run", task_ids="setup")
+    if dry_run:
+        print("rush c submit will not actually submit video to bilibili because dry_run == True")
     rush_c_submit_path = ti.xcom_pull(key="rush_c_submit_path", task_ids=f"upload_to_bilibili_{upload_type}.ensure_rush_c")
     bilibili_upload_result_id = ti.xcom_pull(
         key="bilibili_upload_result_id",
@@ -269,7 +297,13 @@ def rush_c_submit(**kwargs):
     summary_file_name = str(uuid.uuid1())
     execution_summary_path = get_temp_file_abs_path(ti, summary_file_name)
     command = construct_submit_command(archive_info, execution_summary_path, rush_c_submit_path, bvid)
-    return_code = run_command(command)
+    if not dry_run:
+        return_code = run_command(command)
+    else:
+        print(command)
+        print("in dry run mode. exit without executing command")
+        return
+
     if return_code != 0:
         raise AirflowException(f"{command} returns {return_code}")
 
@@ -328,7 +362,8 @@ def create_bilibili_upload_group(upload_type):
     params={
         "path": Param(None),
         "file_obj_id": Param(None),
-        "archive_id": Param(None)
+        "archive_id": Param(None),
+        "dry_run": Param(default=False)
     })
 def on_new_record():
     setup_task = setup().as_setup()
