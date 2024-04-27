@@ -3,3 +3,4 @@ opencv-python
 tzdata
 pymongo~=4.5.0
 webdavclient3
+requests~=2.31.0

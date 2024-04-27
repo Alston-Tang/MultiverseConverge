@@ -25,6 +25,13 @@ def ensure_rush_c(**context):
         raise AirflowException("RushC submit program doesn't exist")
 
 
+@task()
+def ensure_biliup(**context):
+    ti = context["ti"]
+    if not check_binary_exists(ti, "biliup"):
+        raise AirflowException("biliup program doesn't exist")
+
+
 @task(execution_timeout=timedelta(minutes=10))
 def setup(**context):
     ti = context["ti"]
